@@ -4,11 +4,11 @@ class CopyManga extends ComicSource {
 
     key = "copy_manga"
 
-    version = "1.4.3"
+    version = "1.4.4"
 
     minAppVersion = "1.6.0"
 
-    url = "https://cdn.jsdelivr.net/gh/venera-app/venera-configs@main/copy_manga.js"
+    url = "https://raw.githubusercontent.com/metaMMY07/venera-configs/refs/heads/codex/three-source-fixes/copy_manga.js"
 
     async getReqID() {
         if (this.copyRegion === "0") {
@@ -17,11 +17,11 @@ class CopyManga extends ComicSource {
         const reqIdUrl = "https://marketing.aiacgn.com/api/v2/adopr/query3/?format=json&ident=200100001";
         let reqId = "";
         try {
-            const response = await this.networkGet(reqIdUrl, this.headers);
+            const response = await Network.get(reqIdUrl);
 
             if (response.status === 200) {
                 const data = JSON.parse(response.body);
-                reqId = data.results.request_id;
+                reqId = data.results?.request_id ?? "";
             }
         } catch (e) {
         }
@@ -184,7 +184,7 @@ class CopyManga extends ComicSource {
     }
 
     get apiUrl() {
-        return `https://${this.loadSetting('base_url')}`
+        return `https://${this.loadSetting('base_url') || CopyManga.defaultApiUrl}`
     }
 
     get copyRegion() {
@@ -198,8 +198,7 @@ class CopyManga extends ComicSource {
     init() {
         // 用于储存 { 作者名 : 英文参数 }
         this.author_path_word_dict = {}
-        this.refreshSearchApi()
-        this.refreshAppApi()
+        this.refreshSearchApi().catch((error) => console.log(`搜索接口更新失败：${error}`))
     }
 
     /// account
@@ -657,40 +656,24 @@ class CopyManga extends ComicSource {
         loadInfo: async (id) => {
             let getChapters = async (id, groups) => {
                 let fetchSingle = async (id, path) => {
-                    let reqId = await this.getReqID();
-                    let res = await this.networkGet(
-                        `${this.apiUrl}/api/v3/comic/${id}/group/${path}/chapters?limit=100&offset=0&in_mainland=true&request_id=${reqId}`,
-                        this.headers
-                    );
-                    if (res.status !== 200) {
-                        throw `Invalid status code: ${res.status}`;
-                    }
-                    let data = JSON.parse(res.body);
-                    let eps = new Map();
-                    data.results.list.forEach((e) => {
-                        let title = e.name;
-                        let id = e.uuid;
-                        eps.set(id, title);
-                    });
-                    let maxChapter = data.results.total;
-                    if (maxChapter > 100) {
-                        let offset = 100;
-                        while (offset < maxChapter) {
-                            res = await this.networkGet(
-                                `${this.apiUrl}/api/v3/comic/${id}/group/${path}/chapters?limit=100&offset=${offset}`,
-                                this.headers
-                            );
-                            if (res.status !== 200) {
-                                throw `Invalid status code: ${res.status}`;
-                            }
-                            data = JSON.parse(res.body);
-                            data.results.list.forEach((e) => {
-                                let title = e.name;
-                                let id = e.uuid;
-                                eps.set(id, title)
-                            });
-                            offset += 100;
+                    const eps = new Map();
+                    const reqId = await this.getReqID();
+                    const limit = 100;
+                    let total = 0;
+                    for (let offset = 0; offset === 0 || offset < total; offset += limit) {
+                        const response = await this.networkGet(
+                            `${this.apiUrl}/api/v3/comic/${id}/group/${path}/chapters?limit=${limit}&offset=${offset}&in_mainland=true&request_id=${reqId}`,
+                            this.headers
+                        );
+                        const results = this.readResults(response, "章节列表");
+                        if (!Array.isArray(results.list)) {
+                            throw "拷贝漫画未返回章节列表";
                         }
+                        for (const chapter of results.list) {
+                            eps.set(chapter.uuid, chapter.name);
+                        }
+                        const count = Number(results.total);
+                        total = Number.isFinite(count) ? count : 0;
                     }
                     return eps;
                 };
@@ -724,43 +707,39 @@ class CopyManga extends ComicSource {
                 }
             }
 
-            let getFavoriteStatus = async (id) => {
-                let res = await this.networkGet(`${this.apiUrl}/api/v3/comic2/${id}/query`, this.headers);
-                if (res.status !== 200) {
-                    throw `Invalid status code: ${res.status}`;
-                }
-                return JSON.parse(res.body).results.collect != null;
-            }
-            let reqId = await this.getReqID();
-            let results = await Promise.all([
-                this.networkGet(
-                    `${this.apiUrl}/api/v3/comic2/${id}?in_mainland=true&request_id=${reqId}&platform=3`,
-                    this.headers
-                ),
-                getFavoriteStatus.bind(this)(id)
-            ])
-
-            if (results[0].status !== 200) {
-                throw `Invalid status code: ${results[0].status}`;
+            const reqId = await this.getReqID();
+            const results = this.readResults(await this.networkGet(
+                `${this.apiUrl}/api/v3/comic2/${id}?in_mainland=true&request_id=${reqId}&platform=3`,
+                this.headers
+            ), "漫画详情");
+            const comicData = results.comic;
+            if (!comicData?.name) {
+                throw "拷贝漫画未返回漫画详情，请重新搜索该作品";
             }
 
-            let data = JSON.parse(results[0].body).results;
-            let comicData = data.comic;
+            const favorite = this.loadData("token")
+                ? this.networkGet(`${this.apiUrl}/api/v3/comic2/${id}/query`, this.headers)
+                    .then((response) => this.readResults(response, "收藏状态").collect != null)
+                    .catch((error) => {
+                        console.log(`收藏状态加载失败：${error}`);
+                        return false;
+                    })
+                : false;
 
             let title = comicData.name;
             let cover = comicData.cover;
-            let authors = comicData.author.map(e => e.name);
+            let authors = (comicData.author ?? []).map(e => e.name);
             // author_path_word_dict长度限制为最大100
             if (Object.keys(this.author_path_word_dict).length > 100) {
                 this.author_path_word_dict = {};
             }
             // 储存author对应的path_word
-            comicData.author.forEach(e => (this.author_path_word_dict[e.name] = e.path_word));
-            let tags = comicData.theme.map(e => e?.name).filter(name => name !== undefined && name !== null);
+            (comicData.author ?? []).forEach(e => (this.author_path_word_dict[e.name] = e.path_word));
+            let tags = (comicData.theme ?? []).map(e => e?.name).filter(name => name !== undefined && name !== null);
             let updateTime = comicData.datetime_updated ? comicData.datetime_updated : "";
             let description = comicData.brief;
-            let chapters = await getChapters(id, data.groups);
-            let status = comicData.status.display;
+            let chapters = await getChapters(id, results.groups ?? {});
+            let status = comicData.status?.display ?? "";
 
             return {
                 title: title,
@@ -773,84 +752,48 @@ class CopyManga extends ComicSource {
                     "状态": [status],
                 },
                 chapters: chapters,
-                isFavorite: results[1],
+                isFavorite: await favorite,
                 subId: comicData.uuid
             }
         },
         loadEp: async (comicId, epId) => {
-            let attempt = 0;
             const maxAttempts = 5;
-            let res;
-            let data;
-
-            while (attempt < maxAttempts) {
-                try {
-                    let reqId = await this.getReqID();
-                    res = await this.networkGet(
-                        `${this.apiUrl}/api/v3/comic/${comicId}/chapter2/${epId}?in_mainland=true&request_id=${reqId}`,
-                        {
-                            ...this.headers
-                        }
-                    );
-
-                    if (res.status === 210) {
-                        // 210 indicates too frequent access, extract wait time
-                        let waitTime = 40000; // Default wait time 40s
-                        try {
-                            let responseBody = JSON.parse(res.body);
-                            if (
-                                responseBody.message &&
-                                responseBody.message.includes("Expected available in")
-                            ) {
-                                let match = responseBody.message.match(/(\d+)\s*seconds/);
-                                if (match && match[1]) {
-                                    waitTime = parseInt(match[1]) * 1000;
-                                }
-                            }
-                        } catch (e) {
-                            console.log(
-                                "Unable to parse wait time, using default wait time 40s"
-                            );
-                        }
-                        console.log(`Chapter${epId} access too frequent, waiting ${waitTime / 1000}s`);
-                        await new Promise((resolve) => setTimeout(resolve, waitTime));
-                        throw "Retry";
+            for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+                const reqId = await this.getReqID();
+                const response = await this.networkGet(
+                    `${this.apiUrl}/api/v3/comic/${comicId}/chapter2/${epId}?in_mainland=true&request_id=${reqId}`,
+                    this.headers
+                );
+                if (response.status === 210 && attempt < maxAttempts) {
+                    let message;
+                    try {
+                        message = JSON.parse(response.body)?.message;
+                    } catch (error) {
+                        // readResults will report the invalid API response below.
                     }
-
-                    if (res.status !== 200) {
-                        throw `Invalid status code: ${res.status}`;
-                    }
-
-                    data = JSON.parse(res.body);
-                    // console.log(data.results.chapter);
-                    // Handle image link sorting
-                    let imagesUrls = data.results.chapter.contents.map((e) => e.url);
-                    let orders = data.results.chapter.words;
-
-                    // Replace origin images urls to selected quality images urls
-                    let hdImagesUrls = imagesUrls.map((url) =>
-                        url.replace(/([./])c\d+x\.[a-zA-Z]+$/, `$1c${this.imageQuality}x.webp`)
-                    )
-
-                    let images = new Array(hdImagesUrls.length).fill(""); // Initialize an array with the same length as imagesUrls
-
-                    // Arrange images according to orders
-                    for (let i = 0; i < hdImagesUrls.length; i++) {
-                        images[orders[i]] = hdImagesUrls[i];
-                    }
-
-                    return {
-                        images: images,
-                    };
-                } catch (error) {
-                    if (error !== "Retry") {
-                        throw error;
-                    }
-                    attempt++;
-                    if (attempt >= maxAttempts) {
-                        throw error;
+                    const wait = typeof message === "string"
+                        && message.match(/Expected available in[^\d]*(\d+)\s*seconds/i);
+                    if (wait) {
+                        const seconds = Number(wait[1]);
+                        console.log(`Chapter ${epId} access too frequent, waiting ${seconds}s`);
+                        await new Promise((resolve) => setTimeout(resolve, seconds * 1000));
+                        continue;
                     }
                 }
+
+                const chapter = this.readResults(response, "章节").chapter;
+                if (!Array.isArray(chapter?.contents) || !chapter.contents.length || !Array.isArray(chapter.words)) {
+                    throw "拷贝漫画未返回章节图片";
+                }
+
+                const images = new Array(chapter.contents.length);
+                for (let i = 0; i < chapter.contents.length; i++) {
+                    images[chapter.words[i]] = chapter.contents[i].url.replace(
+                        /([./])c\d+x\.[a-zA-Z]+$/,
+                        `$1c${this.imageQuality}x.webp`
+                    );
+                }
+                return { images };
             }
         },
         loadComments: async (comicId, subId, page, replyTo) => {
@@ -1076,7 +1019,6 @@ class CopyManga extends ComicSource {
             buttonText: "点击清除设备信息",
             callback: () => {
                 this.clearDeviceInfo();
-                this.refreshAppApi();
             }
         },
         auto_clear_device_info: {
@@ -1127,17 +1069,20 @@ class CopyManga extends ComicSource {
         }
     }
 
-    async refreshAppApi() {
-        const url = "https://api.copy-manga.com/api/v3/system/network2?platform=3"
-        let res;
+    readResults(response, label) {
+        let payload;
         try {
-            res = await fetch(url, { headers: this.headers });
-        } finally {
-            this.afterRequest();
+            payload = JSON.parse(response.body);
+        } catch (error) {
+            throw `拷贝漫画${label}返回无效响应（HTTP ${response.status}）`;
         }
-        if (res.status === 200) {
-            let data = await res.json();
-            this.settings.base_url = data.results.api[0][0];
+        if (response.status !== 200 || Number(payload?.code ?? 200) !== 200 || !payload?.results) {
+            const message = payload?.results?.detail || payload?.message;
+            if (message && message !== "请求成功") {
+                throw `拷贝漫画${label}：${message}`;
+            }
+            throw `拷贝漫画未返回${label}（HTTP ${response.status}）`;
         }
+        return payload.results;
     }
 }

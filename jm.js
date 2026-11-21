@@ -7,7 +7,7 @@ class JM extends ComicSource {
     // unique id of the source
     key = "jm"
 
-    version = "1.4.0"
+    version = "1.4.1"
 
     minAppVersion = "1.5.0"
 
@@ -16,16 +16,18 @@ class JM extends ComicSource {
     static jmPkgName = "com.example.app"
 
     // update url
-    url = "https://cdn.jsdelivr.net/gh/venera-app/venera-configs@main/jm.js"
+    url = "https://raw.githubusercontent.com/metaMMY07/venera-configs/refs/heads/codex/three-source-fixes/jm.js"
 
     dailyCheckInInProgress = false
 
     static fallbackServers = [
-        "www.cdntwice.org",
-        "www.cdnsha.org",
-        "www.cdnaspa.cc",
-        "www.cdnntr.cc",
+        "www.cdnbtd.cc",
+        "www.cdnutc.cc",
+        "www.cdngwc.net",
+        "www.cdngwc.club",
     ];
+
+    apiDomains = JM.fallbackServers;
 
     static imageUrl = "https://cdn-msp.jmapinodeudzn.net"
 
@@ -36,8 +38,8 @@ class JM extends ComicSource {
     }
 
     get baseUrl() {
-        let index = parseInt(this.loadSetting('apiDomain')) - 1
-        return `https://${JM.apiDomains[index]}`
+        const index = Number(this.loadSetting('apiDomain')) - 1
+        return `https://${this.apiDomains[index] ?? this.apiDomains[0]}`
     }
 
     get imageUrl() {
@@ -45,7 +47,7 @@ class JM extends ComicSource {
     }
 
     overwriteApiDomains(domains) {
-        if (domains.length != 0) JM.apiDomains = domains
+        if (domains.length !== 0) this.apiDomains = domains
     }
 
     overwriteImgUrl(url) {
@@ -118,7 +120,11 @@ class JM extends ComicSource {
 
     async init() {
         if (this.loadSetting('refreshDomainsOnStart')) await this.refreshApiDomains(false)
-        this.refreshImgUrl(false)
+        try {
+            await this.refreshImgUrl(false)
+        } catch (error) {
+            console.log(`图片线路更新失败：${error}`)
+        }
     }
 
     /**
@@ -132,20 +138,23 @@ class JM extends ComicSource {
         let message = ""
         let servers = []
         let domains = []
-        let res = null;
         try {
-            res = await fetch(url, { headers: this.baseHeaders });
-        } catch (error) {
-            res = null;
-        }
-        if (res && res.status === 200) {
-            let data = this.convertData(await res.text(), domainSecret)
-            let json = JSON.parse(data)
-            if (json["Server"]) {
-                title = "Update Success"
-                message = "\n"
-                servers = json["Server"].slice(0, 4)
+            const response = await fetch(url, { headers: this.baseHeaders })
+            if (response.status === 200) {
+                const body = (await response.text()).replace(/^(?:\uFEFF|\u00EF\u00BB\u00BF)/, "").trim()
+                const json = JSON.parse(this.convertData(body, domainSecret))
+                if (Array.isArray(json.Server)) {
+                    servers = [...new Set(json.Server.filter(
+                        (host) => typeof host === "string" && /^www\.cdn[a-z0-9-]+\.[a-z.]+$/i.test(host)
+                    ))].slice(0, 4)
+                }
+                if (servers.length > 0) {
+                    title = "Update Success"
+                    message = "\n"
+                }
             }
+        } catch (error) {
+            console.log(`API 线路更新失败：${error}`)
         }
         if (servers.length === 0) {
             title = "Update Failed"
@@ -184,16 +193,18 @@ class JM extends ComicSource {
      * @param showMessage {boolean}
      */
     async refreshImgUrl(showMessage) {
-        let index = this.loadSetting('imageStream')
+        let index = this.loadSetting('imageStream') || this.settings.imageStream.default
         let res = await this.get(
             `${this.baseUrl}/setting?app_img_shunt=${index}&express=`
         )
         let setting = JSON.parse(res)
-        if (setting["img_host"]) {
+        const imageHost = typeof setting?.img_host === "string" ? setting.img_host.trim() : ""
+        if (imageHost && /^https:\/\/[a-z0-9.-]+\/?$/i.test(imageHost)) {
+            const imageUrl = imageHost.replace(/\/$/, "")
             if (showMessage) {
-                UI.showMessage(`Image Stream ${index}:\n${setting["img_host"]}`)
+                UI.showMessage(`Image Stream ${index}:\n${imageUrl}`)
             }
-            this.overwriteImgUrl(setting["img_host"])
+            this.overwriteImgUrl(imageUrl)
         }
     }
 
@@ -366,8 +377,8 @@ class JM extends ComicSource {
          * logout function, clear account related data
          */
         logout: () => {
-            for (let url of JM.apiDomains) {
-                Network.deleteCookies(url)
+            for (const host of this.apiDomains) {
+                Network.deleteCookies(`https://${host}`)
             }
         },
 
@@ -787,7 +798,7 @@ class JM extends ComicSource {
                 chapters.set(id, '第1話')
             }
             let tags = data.tags ?? []
-            let related = data["related_list"].map((e) => new Comic({
+            let related = (data["related_list"] ?? []).map((e) => new Comic({
                 id: e.id.toString(),
                 title: e.name,
                 subtitle: e.author ?? "",
@@ -824,9 +835,13 @@ class JM extends ComicSource {
          * @returns {Promise<{images: string[]}>}
          */
         loadEp: async (comicId, epId) => {
-            let res = await this.get(`${this.baseUrl}/chapter?id=${epId}`);
-            let data = JSON.parse(res)
-            let images = data.images.map((e) => this.getImageUrl(epId, e))
+            const id = String(epId ?? comicId).replace(/^jm/, "")
+            if (!this.isNum(id)) throw "禁漫天堂章节编号无效"
+            const data = JSON.parse(await this.get(`${this.baseUrl}/chapter?id=${id}`))
+            if (!Array.isArray(data?.images) || data.images.length === 0) {
+                throw "禁漫天堂未返回章节图片"
+            }
+            const images = data.images.map((name) => this.getImageUrl(id, name))
             return {
                 images: images
             }
@@ -871,7 +886,7 @@ class JM extends ComicSource {
                 num = remainder * 2 + 2
             }
             if (num <= 1) {
-                return {}
+                return { headers: this.getImgHeaders() }
             }
             return {
                 headers: this.getImgHeaders(),
