@@ -188,11 +188,11 @@ class CopyManga extends ComicSource {
     }
 
     get copyRegion() {
-        return this.loadSetting('region') || this.defaultCopyRegion
+        return this.loadSetting('region') || CopyManga.defaultCopyRegion
     }
 
     get imageQuality() {
-        return this.loadSetting('image_quality') || this.defaultImageQuality
+        return this.loadSetting('image_quality') || CopyManga.defaultImageQuality
     }
 
     init() {
